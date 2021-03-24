@@ -1,5 +1,5 @@
 import tensorflow as tf
-
+import numpy as np
 
 class HAN(tf.keras.Model):
     def __init__(self, wordvec, params):
@@ -39,9 +39,21 @@ class HAN(tf.keras.Model):
         # StockNet: 2-class
         self.fc_out = tf.keras.layers.Dense(2)
 
+#    def call(self, lis, training=False):
     def call(self, x, day_len, news_len, training=False):
+#        assert(len(lis) == 3)
+#        x = lis[0]
+#        day_len = lis[1]
+#        news_len = lis[2]
+
+#        print(x.shape, type(x))
+
         max_dlen = tf.keras.backend.max(day_len).numpy()
         max_nlen = tf.keras.backend.max(news_len).numpy()
+        
+#        max_dlen = np.max(day_len)
+#        max_nlen = np.max(news_len)
+
         x = x[:, :, :max_dlen, :max_nlen]
         news_len = news_len[:, :, :max_dlen]
 
