@@ -1,58 +1,48 @@
 import tensorflow as tf
 import numpy as np
 
+from tensorflow.keras.layers import Embedding, Dropout, Dense, GRU, CuDNNGRU, Bidirectional
+import tensorflow.nn as nn
+
+
 class HAN(tf.keras.Model):
     def __init__(self, wordvec, params):
+        
         super(HAN, self).__init__()
-
         self.params = params
 
         # wordvec: ndarray
         vocab_size = wordvec.shape[0]
         self.embedding_dim = wordvec.shape[1]
-        self.embedding = tf.keras.layers.Embedding(
-            vocab_size, self.embedding_dim, weights=[wordvec], mask_zero=True,
-            trainable=True,
-            # embeddings_regularizer=tf.keras.regularizers.l2(self.flags.l2)
-        )
+        self.embedding =  Embedding(vocab_size, self.embedding_dim, weights=[wordvec],mask_zero=True,trainable=True,)
 
-        self.dropout = tf.keras.layers.Dropout(rate=self.params['dr'])  # StockNet
+        self.dropout =  Dropout(rate=self.params['dr'])  # StockNet
 
         # Word-level attention
-        self.t = tf.keras.layers.Dense(1, activation=tf.nn.sigmoid)
+        self.word_att =  Dense(1, activation=nn.sigmoid)
 
         # News-level attention
-        self.u = tf.keras.layers.Dense(1, activation=tf.nn.sigmoid)
+        self.news_att =  Dense(1, activation=nn.sigmoid)
 
         # Sequence modeling
-        self.bi_gru = self.get_bi_gru(self.embedding_dim)
+        self.bi_gru = self.make_bi_gru(self.embedding_dim)
 
         # Temporal attention
-        self.o = tf.keras.layers.Dense(1, activation=tf.nn.sigmoid)
+        self.temp_att =  Dense(1, activation=nn.sigmoid)
 
         # Discriminative Network (MLP)
-        self.fc0 = tf.keras.layers.Dense(
-            self.params['hidden_size'], activation=tf.nn.elu)
-        self.fc1 = tf.keras.layers.Dense(
-            self.params['hidden_size'], activation=tf.nn.elu)
+        self.fc0 =  Dense(self.params['hidden_size'], activation = nn.elu)
+        self.fc1 =  Dense(self.params['hidden_size'], activation = nn.elu)
 
-        # StockNet: 2-class
-        self.fc_out = tf.keras.layers.Dense(2)
+        self.fc_out =  Dense(2)
 
-#    def call(self, lis, training=False):
     def call(self, x, day_len, news_len, training=False):
-#        assert(len(lis) == 3)
-#        x = lis[0]
-#        day_len = lis[1]
-#        news_len = lis[2]
-
-#        print(x.shape, type(x))
 
         max_dlen = tf.keras.backend.max(day_len).numpy()
         max_nlen = tf.keras.backend.max(news_len).numpy()
         
-#        max_dlen = np.max(day_len)
-#        max_nlen = np.max(news_len)
+        max_dlen = np.max(day_len)
+        max_nlen = np.max(news_len)
 
         x = x[:, :, :max_dlen, :max_nlen]
         news_len = news_len[:, :, :max_dlen]
@@ -71,8 +61,8 @@ class HAN(tf.keras.Model):
         # x: (batch_size, days, max_daily_news, max_news_words, embedding_dim)
         # t: (batch_size, days, max_daily_news, max_news_words, 1)
         # n: (batch_size, days, max_daily_news, embedding_dim)
-        t = self.t(x)
-        n = tf.nn.softmax(t, axis=3) * x
+        word_att = self.word_att(x)
+        n = nn.softmax(word_att, axis=3) * x
         n = tf.reduce_sum(n, axis=3)
 
         # handle variable-length day news sequences
@@ -81,16 +71,16 @@ class HAN(tf.keras.Model):
         n *= mask
 
         # News-level attention
-        u = self.u(n)
-        d = tf.nn.softmax(u, axis=2) * n
+        news_att = self.news_att(n)
+        d = nn.softmax(news_att, axis=2) * n
         d = tf.reduce_sum(d, axis=2)
 
         # Sequence modeling
-        h = self.bi_gru(d, training=training)
+        gru = self.bi_gru(d, training=training)
 
         # Temporal attention
-        o = self.o(h)
-        v = tf.nn.softmax(o, axis=2) * h
+        temp_att = self.temp_att(gru)
+        v = nn.softmax(temp_att, axis=2) * gru
         v = tf.reduce_sum(v, axis=1)
 
         # Discriminative Network (MLP)
@@ -100,16 +90,8 @@ class HAN(tf.keras.Model):
         v = self.dropout(v) if training else v
         return self.fc_out(v)
 
-    def get_bi_gru(self, units):
+    def make_bi_gru(self, units):
         if tf.test.is_gpu_available() and not self.params['no_gpu']:
-            return tf.keras.layers.Bidirectional(
-                tf.keras.layers.CuDNNGRU(
-                    units, return_sequences=True
-                ), merge_mode='concat'
-            )
+            return  Bidirectional(CuDNNGRU(units, return_sequences=True), merge_mode='concat')
         else:
-            return tf.keras.layers.Bidirectional(
-                tf.keras.layers.GRU(
-                    units, return_sequences=True
-                ), merge_mode='concat'
-            )
+            return  Bidirectional(GRU(units, return_sequences=True), merge_mode='concat')

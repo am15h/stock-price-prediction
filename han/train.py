@@ -1,6 +1,3 @@
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
 from datetime import datetime
 import numpy as np
 import os
@@ -12,197 +9,155 @@ from tensorflow.python.ops import clip_ops
 import time
 from dataset import SnP500Dataset
 from model import HAN
+from bert.optimization import AdamWeightDecayOptimizer
+import keras
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-
-from tensorflow.keras.optimizers import Adam, SGD
-from tensorflow import keras
-
-tf.get_logger().setLevel('INFO')
-tf.autograph.set_verbosity(1)
-
-import logging
-logging.getLogger('tensorflow').disabled = True
+tfe = tf.contrib.eager
 
 
-class PlotLosses(keras.callbacks.Callback):
-    def __init__(self):
-        super(PlotLosses, self).__init__()
-
-    def on_train_begin(self, logs={}):
-        self.i = 0
-        self.x = []
-        
-        self.losses = []
-        self.val_losses = []
-
-        self.fig = plt.figure()
-        self.logs = []
-
-    def on_epoch_end(self, epoch, logs={}):
-        self.logs.append(logs)
-        self.x.append(self.i)
-        self.losses.append(logs.get('loss'))
-        self.val_losses.append(logs.get('val_loss'))
-        self.i += 1
-
-        plt.ylabel('Train and Validation Loss')
-        plt.xlabel('Number Of Epochs')
-
-        plt.plot(self.x, self.losses, label = "Train Loss")
-        plt.plot(self.x, self.val_losses, label = "Validation Loss")
-
-        plt.legend()
-        plt.show();
-
-        plt.savefig('training_curve.png')
-
-        plt.gcf().clear()
+def loss(logits, labels, weights):
+    weighted_labels = tf.reduce_sum(
+        tf.constant(weights, dtype=tf.float32) * tf.one_hot(labels, 2), axis=1)
+    unweighted_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+        labels=labels, logits=logits)
+    return tf.reduce_mean(unweighted_losses * weighted_labels)
 
 
-def gen(dataset, batch_size):
-    cnt = 0
-
-    while True:
-        day = []
-        day_len = []
-        news_len = []
-        label = []
-
-        for x in range (batch_size):
-            for (days, day_lens, news_lens), labels in dataset:
-                cnt += 1
-                if(cnt % 500 == 0):
-                    print(cnt)
-                day.append(days)
-                day_len.append(day_lens)
-                news_len.append(news_lens)
-                label.append(labels)
-            
-        yield ((day, day_len, news_len), label)
+def compute_accuracy(logits, labels):
+    predictions = tf.argmax(logits, axis=1, output_type=tf.int64)
+    labels = tf.cast(labels, tf.int64)
+    batch_size = int(logits.shape[0])
+    return tf.reduce_sum(
+        tf.cast(tf.equal(predictions, labels), dtype=tf.float32)) / batch_size
 
 
-def train(params):
+def train_step(model, optimizer, dataset, step_counter, ep, class_weights, params, log_interval=None):
 
+    start = time.time()
+    steps = 0
+    total_loss = 0
+    for step, ((days, day_lens, news_lens), labels) in enumerate(dataset):
+        steps += 1
+        with tf.GradientTape() as tape:
+            logits = model(days, day_lens, news_lens, training=True)
+            loss_value = loss(logits, labels, class_weights)
+            total_loss += loss_value
+
+        grads = tape.gradient(loss_value, model.trainable_weights)
+        grads, _ = clip_ops.clip_by_global_norm(grads, params['clip_norm'])
+
+        optimizer.apply_gradients(zip(grads, model.trainable_weights), global_step=step_counter)
+
+    params['train_losses'].append(total_loss/steps)
+
+
+def test(model, dataset, class_weights, show_classification_report=False, ds_name='Test'):
+
+    start = time.time()
+    avg_loss = tfe.metrics.Mean('loss', dtype=tf.float32)
+    accuracy = tfe.metrics.Accuracy('accuracy', dtype=tf.float32)
+
+    y_true = list()
+    y_pred = list()
+    for (days, day_lens, news_lens), labels in dataset:
+        logits = model(days, day_lens, news_lens, training=False)
+        avg_loss(loss(logits, labels, class_weights))
+        pred = tf.argmax(logits, axis=1, output_type=tf.int64)
+        accuracy(pred, tf.cast(labels, tf.int64))
+
+        if show_classification_report:
+            y_true.extend(labels.numpy().tolist())
+            y_pred.extend(pred.numpy().tolist())
+    end = time.time()
+    print('%s set: Average loss: %.6f, Accuracy: %.3f%% (%.3f sec)' %
+          (ds_name, avg_loss.result(), 100 * accuracy.result(), end - start))
+
+
+    if show_classification_report:
+        print(classification_report(y_true, y_pred, target_names=['DOWN', 'UP']))
+
+    return accuracy.result(), avg_loss.result()
+
+
+def train(parameters, train_ds, val_ds, wordvec, class_weights):
     tf.enable_eager_execution()
-    (device, data_format) = ('/gpu:0', 'channels_first')
-    if params['no_gpu'] > 0 or not tf.test.is_gpu_available():
-        (device, data_format) = ('/cpu:0', 'channels_last')
+    tf.logging.set_verbosity(tf.logging.ERROR)
 
+    random_seed.set_random_seed(parameters['seed'])
+
+    (device, data_format) = ('/gpu:0', 'channels_first')
+    if parameters['no_gpu'] > 0 or not tf.test.is_gpu_available():
+        (device, data_format) = ('/cpu:0', 'channels_last')
     print('Using device %s, and data format %s.' % (device, data_format))
 
-    batch_size = params['batch_size']
-    print("Loading Dataset...")
-    dataset = pickle.load(open(params['data_path'], 'rb'))
-
-    train_set, dev_set, test_set = dataset.get_dataset(batch_size,params['max_date_len'], params['max_news_len'])
+    model = HAN(wordvec, parameters)
     
-    model = HAN(dataset.wordvec, params)
+    optimizer = AdamWeightDecayOptimizer(
+        learning_rate=parameters['learning_rate'],
+        weight_decay_rate=0.0,
+        beta_1=0.9,
+        beta_2=0.999,
+        epsilon=1e-6,
+        exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
 
-#   TODO: Improve how this step is implemented. Takes up time.
-
-    tick = time.time()
+    timestamp = datetime.now().strftime(' %d%m%y %H%M%S')
     
-    train_steps = 0
+    # Create and restore checkpoint (if one exists on the path)
+    checkpoint_prefix = os.path.join(parameters['model_dir'], 'ckpt')
+    step_counter = tf.train.get_or_create_global_step()
+    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer, step_counter=step_counter)
 
-    days_train = []
-    day_lens_train = []
-    news_lens_train = []
+    best_acc_ep = (0.0, -1, float('inf'))  # acc, epoch, loss
+    patience = 0
 
-    for step, ((days, day_lens, news_lens), labels) in enumerate(train_set):
-#        logits = model(days, day_lens, news_lens, training=True)
-        days_train.append(days)
-        day_lens_train.append(day_lens)
-        news_lens_train.append(news_lens)
-        train_steps += 1
+    with tf.device(device):
+        for ep in range(parameters['train_epochs']):
+            start = time.time()
+            train_step(model, optimizer, train_ds, step_counter, ep, class_weights, parameters, parameters['log_interval'])
+            
+            val_acc, val_loss = test(model, val_ds, class_weights, ds_name='Val')
 
-    valid_steps = 0
+            end = time.time()
+            print('\n Epoch: {} \tTime: {:.6f}'.format(ep + 1, end - start))
 
-    days_val = []
-    day_lens_val = []
-    news_lens_val = []
+            parameters['val_losses'].append(val_loss)
 
-    for step, ((days, day_lens, news_lens), labels) in enumerate(dev_set):
-#        logits = model(days, day_lens, news_lens, training=True)
-        days_val.append(days)
-        day_lens_val.append(day_lens)
-        news_lens_val.append(news_lens)
-        valid_steps += 1
-    
-    tock = time.time()
+            if val_loss.numpy() < best_acc_ep[2]:
+                best_acc_ep = (val_acc.numpy(), ep, val_loss.numpy())
+                print('Save checkpoint', checkpoint_prefix)
+                checkpoint.save(checkpoint_prefix)
+            else:
+                if patience == parameters['patience']:
+                    print('Apply early stopping')
+                    break
 
+                patience += 1
+                print('patience {}/{}'.format(patience, parameters['patience']))
 
-    """
-    days_train = np.array(days_train, dtype=object)
-    day_lens_train = np.array(day_lens_train, dtype=object)
-    news_lens_train = np.array(news_lens_train, dtype=object)
+        print('Min loss {:.6f}, dev acc. {:.3f}%, ep {} \n'.format(
+                best_acc_ep[2], best_acc_ep[0] * 100., best_acc_ep[1] + 1))
+        
 
-    days_val = np.array(days_val, dtype=object)
-    day_lens_val = np.array(day_lens_val, dtype=object)
-    news_lens_val = np.array(news_lens_val, dtype=object)
-    
-    print(tock - tick)
-    print("Training : ")
-    print(type(days_train), days_train.shape)
-    print(type(day_lens_train), day_lens_train.shape)
-    print(type(news_lens_train), news_lens_train.shape)
-    
-    print("Validation : ")
-    print(type(days_val), days_val.shape)
-    print(type(day_lens_val), day_lens_val.shape)
-    print(type(news_lens_val), news_lens_val.shape)
-    """
-
-    print("Train Steps = ", train_steps)
-    print("Validation Steps = ", valid_steps)
-
-    if params['optimizer'] == 'adam':
-        opt = Adam(lr=params['learning_rate'], decay=params['decay_rate'],beta_1=params['betas'][0], beta_2=params['betas'][1], epsilon=1e-6)
-    else:
-        opt = SGD(lr=params['learning_rate'], decay=params['decay_rate'], momentum=0.99, nesterov=True)
-
-    model.compile(loss=params['loss_function'], optimizer=opt, metrics=['accuracy'])
-   
-#    print(dataset.wordvec.shape)
-
-    callbacks = []
-
-    best_acc = keras.callbacks.ModelCheckpoint("best_acc.h5", monitor='val_acc', verbose=0,save_best_only=True, save_weights_only=True, mode='auto', period=1)
-    callbacks.append(best_acc)
-
-    best_loss = keras.callbacks.ModelCheckpoint('best_loss.h5', monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=True,mode='auto', period=1)
-    callbacks.append(best_loss)
-
-    all_models = keras.callbacks.ModelCheckpoint('all_models' + '-{epoch:03d}.h5',verbose=0, save_best_only=False, save_weights_only=True, period=5)
-    callbacks.append(all_models)
-
-    plot_loss = PlotLosses()
-    callbacks.append(plot_loss)
-
-    train_merged = np.stack([days_train, day_lens_train, news_lens_train], axis = 1)
-    val_merged = np.stack([days_val, day_lens_val, news_lens_val], axis = 1)
-
-#    logits = model(days_train, day_lens_train, news_lens_train, training=True)
-
-#    hist = model.fit(train_set, steps_per_epoch = (train_steps // batch_size), epochs = params['train_epochs'], verbose = 2, class_weight = dataset.class_weights,callbacks=callbacks, validation_data=dev_set, validation_steps=(valid_steps //batch_size))
-
-#    hist = model.fit(train_merged, steps_per_epoch = (train_steps // batch_size), epochs = params['train_epochs'], verbose = 2, class_weight = dataset.class_weights,callbacks=callbacks, validation_data=val_merged, validation_steps=(valid_steps //batch_size))
-
-    hist = model.fit_generator(gen(train_set, params['batch_size']), steps_per_epoch = (train_steps // batch_size), epochs = params['train_epochs'], verbose = 2,class_weight = dataset.class_weights, callbacks=callbacks,validation_data=gen(dev_set, params['batch_size']), validation_steps=(valid_steps // batch_size))
-
-    model_arch = model.to_json()
-    open('model_architecture.json', 'w').write(model_arch)       
-
-    model.save_weights('trained_model.h5')
-
-    model._name = "Hierarchical Attention Network"
+    model._name = "Hybrid Attention Network"
     model.summary()
 
 
+    plt.ylabel('Training/Validation Loss')
+    plt.xlabel('Number of Epochs')
+    plt.plot(parameters['train_losses'], label="Train Loss")
+    plt.plot(parameters['val_losses'], label="Validation Loss")
+    plt.legend()
+    plt.show();
+    plt.savefig('han_training_curve.png')
+    plt.gcf().clear()
+
+"""
 if __name__ == '__main__':
+    
     params = {}
     params['optimizer'] = 'adam'
     params['decay_rate'] = 0.0
@@ -224,5 +179,11 @@ if __name__ == '__main__':
     params['seed'] = 2019
     params['data_path'] = 'data/sp500glove.pkl'
     params['no_gpu'] = 0
+    params['output_dir'] = 'summaries/'
+    params['model_dir'] = 'checkpoints'
+    params['train_losses'] = []
+    params['val_losses'] = []
 
     train(params)
+
+"""
