@@ -458,7 +458,7 @@ class SnP500Dataset:
                 label_date = stock_history[i][0]
 
                 # split to train/dev/test sets
-                if date(2014, 1, 1) <= label_date < date(2015, 8, 1):
+                if date(2008, 5, 8) <= label_date < date(2014, 12, 2):
                     train_x.append(ex)
                     train_y.append(label)
 
@@ -470,7 +470,7 @@ class SnP500Dataset:
                     num_dates += self.flags.days
                     num_stock_dates += self.flags.days
 
-                elif date(2015, 8, 1) <= label_date < date(2015, 10, 1):
+                elif date(2014, 12, 2) <= label_date < date(2015, 7, 25):
                     dev_x.append(ex)
                     dev_y.append(label)
 
@@ -482,7 +482,7 @@ class SnP500Dataset:
                     num_dates += self.flags.days
                     num_stock_dates += self.flags.days
 
-                elif date(2015, 10, 1) <= label_date < date(2016, 1, 1):
+                elif date(2015, 7, 25) <= label_date < date(2016, 8, 1):
                     test_x.append(ex)
                     test_y.append(label)
 

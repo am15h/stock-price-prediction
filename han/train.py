@@ -130,13 +130,13 @@ def train(parameters, train_ds, val_ds, wordvec, class_weights):
                 best_acc_ep = (val_acc.numpy(), ep, val_loss.numpy())
                 print('Save checkpoint', checkpoint_prefix)
                 checkpoint.save(checkpoint_prefix)
-            else:
-                if patience == parameters['patience']:
-                    print('Apply early stopping')
-                    break
+#            else:
+#                if patience == parameters['patience']:
+#                    print('Apply early stopping')
+#                    break
 
-                patience += 1
-                print('patience {}/{}'.format(patience, parameters['patience']))
+#                patience += 1
+#                print('patience {}/{}'.format(patience, parameters['patience']))
 
         print('Min loss {:.6f}, dev acc. {:.3f}%, ep {} \n'.format(
                 best_acc_ep[2], best_acc_ep[0] * 100., best_acc_ep[1] + 1))
