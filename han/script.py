@@ -20,7 +20,7 @@ tfe = tf.contrib.eager
 from train import *
 
 if __name__ == '__main__':
-    
+
     params = {}
     params['optimizer'] = 'adam'
     params['decay_rate'] = 0.0
@@ -32,7 +32,7 @@ if __name__ == '__main__':
     params['l2'] = 1e-6
     params['clip_norm'] = 5.0
     params['hidden_size'] = 50
-    params['train_epochs'] = 50
+    params['train_epochs'] = 10
     params['patience'] = 1
     params['log_interval'] = 50
     params['vocab_size'] = 33000
@@ -59,7 +59,7 @@ if __name__ == '__main__':
     train(params, train_ds, val_ds, dataset.wordvec, dataset.class_weights)
 
     model = HAN(dataset.wordvec, params)
-    
+
     optimizer = AdamWeightDecayOptimizer(
         learning_rate=params['learning_rate'],
         weight_decay_rate=0.0,
@@ -69,7 +69,7 @@ if __name__ == '__main__':
         exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
 
     timestamp = datetime.now().strftime(' %d%m%y %H%M%S')
-    
+
     checkpoint_prefix = os.path.join(params['model_dir'], 'ckpt')
     step_counter = tf.train.get_or_create_global_step()
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer, step_counter=step_counter)
